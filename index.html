@@ -759,20 +759,27 @@ async function tgSave() {
 async function tgLoad() {
   try {
     showNotif('⏳ Загрузка данных...', 'success');
-    const res = await fetch(`${TG_API}/getUpdates?limit=100`);
-    const data = await res.json();
-    if (!data.ok) { showNotif('❌ Ошибка загрузки', 'error'); return; }
 
-    // Ищем последнее сообщение с файлом database.json
-    const msgs = data.result.reverse();
-    let fileId = null;
-    for (const upd of msgs) {
-      const doc = upd.message?.document;
-      if (doc && doc.file_name === 'database.json') {
-        fileId = doc.file_id;
-        tgFileMessageId = upd.message.message_id;
-        break;
+    // Ищем последний файл database.json перебирая сообщения
+    let fileId = null, offset = 0, found = false;
+    for (let attempt = 0; attempt < 5 && !found; attempt++) {
+      const res = await fetch(`${TG_API}/getUpdates?limit=100&offset=${offset}`);
+      const data = await res.json();
+      if (!data.ok || !data.result.length) break;
+
+      // Берём последнее сообщение с database.json из этой порции
+      const msgs = [...data.result].reverse();
+      for (const upd of msgs) {
+        const doc = upd.message?.document;
+        if (doc && doc.file_name === 'database.json') {
+          fileId = doc.file_id;
+          tgFileMessageId = upd.message.message_id;
+          found = true;
+          break;
+        }
       }
+      // Сдвигаем offset на следующую порцию
+      offset = data.result[data.result.length - 1].update_id + 1;
     }
 
     if (!fileId) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
@@ -786,9 +793,9 @@ async function tgLoad() {
     const fileRes = await fetch(fileUrl);
     const db = await fileRes.json();
 
-    if (db.training) { DATA = db.training; nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1; }
-    if (db.events)   { EVENTS = db.events; nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1; }
-    if (db.progress) { PROGRESS = db.progress; nextProgId = Math.max(...PROGRESS.map(p => p.id), 0) + 1; }
+    if (db.training && db.training.length) { DATA = db.training; nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1; }
+    if (db.events && db.events.length)     { EVENTS = db.events; nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1; }
+    if (db.progress && db.progress.length) { PROGRESS = db.progress; nextProgId = Math.max(...PROGRESS.map(p => p.id), 0) + 1; }
 
     refreshAll();
     renderEventsKPIs(); renderEventsCharts(); renderEventsList();
