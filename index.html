@@ -728,12 +728,7 @@ let tgLastFileId = localStorage.getItem('tg_last_file_id') || null;
 
 async function tgSave() {
   try {
-    const json = JSON.stringify({ training: DATA, events: EVENTS, progress: PROGRESS }, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const form = new FormData();
-    form.append('chat_id', TG_CHAT_ID);
-    form.append('document', blob, 'database.json');
-    form.append('caption', '💾 database.json | ' + new Date().toLocaleString('ru-RU'));
+    const json = JSON.stringify({ training: DATA, events: EVENTS, progress: PROGRESS });
 
     // Удаляем старое сообщение если есть
     if (tgFileMessageId) {
@@ -744,14 +739,21 @@ async function tgSave() {
       });
     }
 
-    const res = await fetch(`${TG_API}/sendDocument`, { method: 'POST', body: form });
+    // Сохраняем данные как текстовое сообщение
+    const res = await fetch(`${TG_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        text: '💾DB:' + json,
+        disable_notification: true
+      })
+    });
     const data = await res.json();
     if (data.ok) {
       tgFileMessageId = data.result.message_id;
-      // Сохраняем file_id локально чтобы потом загрузить
-      const fileId = data.result.document.file_id;
-      tgLastFileId = fileId;
-      localStorage.setItem('tg_last_file_id', fileId);
+      tgLastFileId = String(data.result.message_id);
+      localStorage.setItem('tg_last_file_id', tgLastFileId);
       showNotif('✅ Сохранено в Telegram', 'success');
     } else {
       showNotif('❌ Ошибка сохранения: ' + data.description, 'error');
@@ -765,18 +767,35 @@ async function tgLoad() {
   try {
     showNotif('⏳ Загрузка данных...', 'success');
 
-    // Берём file_id из localStorage (сохранялся при последнем сохранении)
-    const fileId = tgLastFileId;
-    if (!fileId) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
+    const msgId = tgLastFileId;
+    if (!msgId) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
 
-    // Получаем ссылку на файл по file_id
-    const fRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
-    const fData = await fRes.json();
-    if (!fData.ok) { showNotif('❌ Ошибка получения файла', 'error'); return; }
+    // Читаем сообщение по message_id через copyMessage trick
+    // Используем getUpdates с большим offset чтобы найти нужное сообщение
+    // Альтернатива — forwardMessage + deleteMessage
+    const res = await fetch(`${TG_API}/forwardMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        from_chat_id: TG_CHAT_ID,
+        message_id: parseInt(msgId)
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) { showNotif('❌ Ошибка загрузки: ' + data.description, 'error'); return; }
 
-    const fileUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${fData.result.file_path}`;
-    const fileRes = await fetch(fileUrl);
-    const db = await fileRes.json();
+    const text = data.result.text || '';
+    if (!text.startsWith('💾DB:')) { showNotif('❌ Формат данных неверный', 'error'); return; }
+
+    // Удаляем пересланное сообщение чтобы не засорять чат
+    await fetch(`${TG_API}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, message_id: data.result.message_id })
+    });
+
+    const db = JSON.parse(text.slice(5)); // убираем '💾DB:'
 
     if (db.training && db.training.length) { DATA = db.training; nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1; }
     if (db.events && db.events.length)     { EVENTS = db.events; nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1; }
