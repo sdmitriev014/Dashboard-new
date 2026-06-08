@@ -728,36 +728,47 @@ let tgLastFileId = localStorage.getItem('tg_last_file_id') || null;
 
 async function tgSave() {
   try {
-    const json = JSON.stringify({ training: DATA, events: EVENTS, progress: PROGRESS });
+    // Сжимаем данные — убираем лишние поля чтобы уложиться в лимит Telegram 4096 символов
+    const compact = {
+      t: DATA.map(r => [r.id, r.name, r.position||'', r.dept||'', r.type, r.course, r.date_raw||'', r.year||0, r.month||0, r.cost||0, r.currency||'сом']),
+      e: EVENTS.map(e => [e.id, e.name, e.type, e.date_raw||'', e.year||0, e.month||0, e.attendees||0, e.cost||0, e.currency||'сом', e.rating||0, e.notes||'']),
+      p: PROGRESS.map(p => [p.id, p.name, p.year||0, p.status, p.enrolled||0, p.done||0, p.pct||0])
+    };
+    const json = JSON.stringify(compact);
+    const chunks = [];
+    const chunkSize = 3900;
+    const prefix = '💾DB:';
+    if (json.length + prefix.length <= 4096) {
+      chunks.push(prefix + json);
+    } else {
+      // Разбиваем на части если данных много
+      for (let i = 0; i < json.length; i += chunkSize) {
+        chunks.push(`💾DB${i===0?'S':i}:` + json.slice(i, i + chunkSize));
+      }
+    }
 
-    // Отправляем данные как сообщение
-    const res = await fetch(`${TG_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TG_CHAT_ID,
-        text: '💾DB:' + json,
-        disable_notification: true
-      })
-    });
-    const data = await res.json();
-    if (!data.ok) { showNotif('❌ Ошибка: ' + data.description, 'error'); return; }
+    // Отправляем первую (или единственную) часть и закрепляем
+    let lastMsgId = null;
+    for (const chunk of chunks) {
+      const res = await fetch(`${TG_API}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TG_CHAT_ID, text: chunk, disable_notification: true })
+      });
+      const data = await res.json();
+      if (!data.ok) { showNotif('❌ Ошибка: ' + data.description, 'error'); return; }
+      if (!lastMsgId) lastMsgId = data.result.message_id;
+    }
 
-    const newMsgId = data.result.message_id;
-
-    // Закрепляем сообщение (чтобы всегда можно было найти)
+    // Закрепляем первое сообщение
     await fetch(`${TG_API}/pinChatMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TG_CHAT_ID,
-        message_id: newMsgId,
-        disable_notification: true
-      })
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, message_id: lastMsgId, disable_notification: true })
     });
 
-    // Удаляем предыдущее сохранение если было
-    if (tgFileMessageId && tgFileMessageId !== newMsgId) {
+    // Удаляем предыдущее сохранение
+    if (tgFileMessageId && tgFileMessageId !== lastMsgId) {
       await fetch(`${TG_API}/deleteMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -765,8 +776,8 @@ async function tgSave() {
       });
     }
 
-    tgFileMessageId = newMsgId;
-    localStorage.setItem('tg_last_file_id', String(newMsgId));
+    tgFileMessageId = lastMsgId;
+    localStorage.setItem('tg_last_file_id', String(lastMsgId));
     showNotif('✅ Сохранено в Telegram', 'success');
   } catch (e) {
     showNotif('❌ Нет соединения с Telegram', 'error');
@@ -790,16 +801,27 @@ async function tgLoad() {
     if (!pinned) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
 
     const text = pinned.text || '';
-    if (!text.startsWith('💾DB:')) { showNotif('❌ Формат данных неверный', 'error'); return; }
+    if (!text.startsWith('💾DB')) { showNotif('❌ Формат данных неверный', 'error'); return; }
 
     tgFileMessageId = pinned.message_id;
     localStorage.setItem('tg_last_file_id', String(pinned.message_id));
 
-    const db = JSON.parse(text.slice(5));
+    const jsonStr = text.slice(text.indexOf(':') + 1);
+    const compact = JSON.parse(jsonStr);
 
-    if (db.training && db.training.length) { DATA = db.training; nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1; }
-    if (db.events && db.events.length)     { EVENTS = db.events; nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1; }
-    if (db.progress && db.progress.length) { PROGRESS = db.progress; nextProgId = Math.max(...PROGRESS.map(p => p.id), 0) + 1; }
+    // Разворачиваем компактный формат
+    if (compact.t) {
+      DATA = compact.t.map(r => ({id:r[0],name:r[1],position:r[2],dept:r[3],type:r[4],course:r[5],date_raw:r[6],year:r[7],month:r[8],cost:r[9],currency:r[10]}));
+      nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1;
+    }
+    if (compact.e) {
+      EVENTS = compact.e.map(e => ({id:e[0],name:e[1],type:e[2],date_raw:e[3],year:e[4],month:e[5],attendees:e[6],cost:e[7],currency:e[8],rating:e[9],notes:e[10]}));
+      nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1;
+    }
+    if (compact.p) {
+      PROGRESS = compact.p.map(p => ({id:p[0],name:p[1],year:p[2],status:p[3],enrolled:p[4],done:p[5],pct:p[6]}));
+      nextProgId = Math.max(...PROGRESS.map(p => p.id), 0) + 1;
+    }
 
     refreshAll();
     renderEventsKPIs(); renderEventsCharts(); renderEventsList();
