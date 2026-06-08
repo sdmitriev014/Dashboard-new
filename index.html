@@ -723,7 +723,8 @@ td.name-cell{color:var(--text);font-weight:500}
 const TG_TOKEN = '8603166159:AAFoUku3YvQVGRHWo4e_mWxxxtW2z3Dijgo';
 const TG_CHAT_ID = '1030862402';
 const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`;
-let tgFileMessageId = null; // ID сообщения с файлом в чате
+let tgFileMessageId = null;
+let tgLastFileId = localStorage.getItem('tg_last_file_id') || null;
 
 async function tgSave() {
   try {
@@ -747,6 +748,10 @@ async function tgSave() {
     const data = await res.json();
     if (data.ok) {
       tgFileMessageId = data.result.message_id;
+      // Сохраняем file_id локально чтобы потом загрузить
+      const fileId = data.result.document.file_id;
+      tgLastFileId = fileId;
+      localStorage.setItem('tg_last_file_id', fileId);
       showNotif('✅ Сохранено в Telegram', 'success');
     } else {
       showNotif('❌ Ошибка сохранения: ' + data.description, 'error');
@@ -760,31 +765,11 @@ async function tgLoad() {
   try {
     showNotif('⏳ Загрузка данных...', 'success');
 
-    // Ищем последний файл database.json перебирая сообщения
-    let fileId = null, offset = 0, found = false;
-    for (let attempt = 0; attempt < 5 && !found; attempt++) {
-      const res = await fetch(`${TG_API}/getUpdates?limit=100&offset=${offset}`);
-      const data = await res.json();
-      if (!data.ok || !data.result.length) break;
-
-      // Берём последнее сообщение с database.json из этой порции
-      const msgs = [...data.result].reverse();
-      for (const upd of msgs) {
-        const doc = upd.message?.document;
-        if (doc && doc.file_name === 'database.json') {
-          fileId = doc.file_id;
-          tgFileMessageId = upd.message.message_id;
-          found = true;
-          break;
-        }
-      }
-      // Сдвигаем offset на следующую порцию
-      offset = data.result[data.result.length - 1].update_id + 1;
-    }
-
+    // Берём file_id из localStorage (сохранялся при последнем сохранении)
+    const fileId = tgLastFileId;
     if (!fileId) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
 
-    // Получаем ссылку на файл
+    // Получаем ссылку на файл по file_id
     const fRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
     const fData = await fRes.json();
     if (!fData.ok) { showNotif('❌ Ошибка получения файла', 'error'); return; }
