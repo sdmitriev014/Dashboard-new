@@ -730,16 +730,7 @@ async function tgSave() {
   try {
     const json = JSON.stringify({ training: DATA, events: EVENTS, progress: PROGRESS });
 
-    // Удаляем старое сообщение если есть
-    if (tgFileMessageId) {
-      await fetch(`${TG_API}/deleteMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TG_CHAT_ID, message_id: tgFileMessageId })
-      });
-    }
-
-    // Сохраняем данные как текстовое сообщение
+    // Отправляем данные как сообщение
     const res = await fetch(`${TG_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -750,14 +741,33 @@ async function tgSave() {
       })
     });
     const data = await res.json();
-    if (data.ok) {
-      tgFileMessageId = data.result.message_id;
-      tgLastFileId = String(data.result.message_id);
-      localStorage.setItem('tg_last_file_id', tgLastFileId);
-      showNotif('✅ Сохранено в Telegram', 'success');
-    } else {
-      showNotif('❌ Ошибка сохранения: ' + data.description, 'error');
+    if (!data.ok) { showNotif('❌ Ошибка: ' + data.description, 'error'); return; }
+
+    const newMsgId = data.result.message_id;
+
+    // Закрепляем сообщение (чтобы всегда можно было найти)
+    await fetch(`${TG_API}/pinChatMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        message_id: newMsgId,
+        disable_notification: true
+      })
+    });
+
+    // Удаляем предыдущее сохранение если было
+    if (tgFileMessageId && tgFileMessageId !== newMsgId) {
+      await fetch(`${TG_API}/deleteMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TG_CHAT_ID, message_id: tgFileMessageId })
+      });
     }
+
+    tgFileMessageId = newMsgId;
+    localStorage.setItem('tg_last_file_id', String(newMsgId));
+    showNotif('✅ Сохранено в Telegram', 'success');
   } catch (e) {
     showNotif('❌ Нет соединения с Telegram', 'error');
   }
@@ -767,35 +777,25 @@ async function tgLoad() {
   try {
     showNotif('⏳ Загрузка данных...', 'success');
 
-    const msgId = tgLastFileId;
-    if (!msgId) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
-
-    // Читаем сообщение по message_id через copyMessage trick
-    // Используем getUpdates с большим offset чтобы найти нужное сообщение
-    // Альтернатива — forwardMessage + deleteMessage
-    const res = await fetch(`${TG_API}/forwardMessage`, {
+    // Читаем закреплённое сообщение чата
+    const res = await fetch(`${TG_API}/getChat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TG_CHAT_ID,
-        from_chat_id: TG_CHAT_ID,
-        message_id: parseInt(msgId)
-      })
+      body: JSON.stringify({ chat_id: TG_CHAT_ID })
     });
     const data = await res.json();
-    if (!data.ok) { showNotif('❌ Ошибка загрузки: ' + data.description, 'error'); return; }
+    if (!data.ok) { showNotif('❌ Ошибка: ' + data.description, 'error'); return; }
 
-    const text = data.result.text || '';
+    const pinned = data.result.pinned_message;
+    if (!pinned) { showNotif('📂 База пустая — начните добавлять данные', 'success'); return; }
+
+    const text = pinned.text || '';
     if (!text.startsWith('💾DB:')) { showNotif('❌ Формат данных неверный', 'error'); return; }
 
-    // Удаляем пересланное сообщение чтобы не засорять чат
-    await fetch(`${TG_API}/deleteMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TG_CHAT_ID, message_id: data.result.message_id })
-    });
+    tgFileMessageId = pinned.message_id;
+    localStorage.setItem('tg_last_file_id', String(pinned.message_id));
 
-    const db = JSON.parse(text.slice(5)); // убираем '💾DB:'
+    const db = JSON.parse(text.slice(5));
 
     if (db.training && db.training.length) { DATA = db.training; nextDataId = Math.max(...DATA.map(r => r.id), 99) + 1; }
     if (db.events && db.events.length)     { EVENTS = db.events; nextEventId = Math.max(...EVENTS.map(e => e.id), 0) + 1; }
